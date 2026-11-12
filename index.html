@@ -1,0 +1,404 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover,user-scalable=no">
+<title>Ring</title>
+<style>
+html,body{margin:0;height:100%;background:#000;overflow:hidden;-webkit-user-select:none;user-select:none;touch-action:manipulation}
+canvas{display:block;width:100%;height:100%}
+</style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+(function () {
+"use strict";
+
+/* ---------- setup ---------- */
+var cv = document.getElementById("c"), ctx = cv.getContext("2d");
+var W, H, DPR, cellW, cellH, cols, rows, Rpx, cx, cy;
+var LOOP = 20;              // seconds per cycle
+var TILT = 0.2;             // camera pitch (rad)
+var F = 7;                  // perspective distance
+
+function mulberry(a) {
+  return function () {
+    a |= 0; a = a + 0x6D2B79F5 | 0;
+    var t = Math.imul(a ^ a >>> 15, 1 | a);
+    t = t + Math.imul(t ^ t >>> 7, 61 | t) ^ t;
+    return ((t ^ t >>> 14) >>> 0) / 4294967296;
+  };
+}
+var rnd = mulberry(20260);
+function sg(v) { return v < 0 ? -1 : 1; }
+var PI2 = Math.PI * 2;
+
+/* ---------- geometry: point cloud with normals ---------- */
+// stride: x y z nx ny nz reveal kind seed phase
+var S = 10, P = [];
+var KB = 0, KP = 1, KG = 2; // band, prong/head, gem
+
+function revOf(kind, y) {
+  var j = (rnd() - 0.5) * 0.3;
+  if (kind === KB) return 0.15 + ((y + 1.12) / 2.24) * 3.0 + j;
+  if (kind === KP) return 3.0 + ((y - 1.0) / 0.45) * 1.4 + j;
+  return 4.4 + ((y - 1.2) / 0.34) * 1.4 + j;
+}
+function push(x, y, z, nx, ny, nz, kind, ph) {
+  var l = Math.sqrt(nx * nx + ny * ny + nz * nz) || 1;
+  P.push(x, y, z, nx / l, ny / l, nz / l, revOf(kind, y), kind, (rnd() * 256) | 0, ph);
+}
+
+// band: rounded-rectangle cross-section swept around a circle
+(function band() {
+  var R = 1, PA = 0.12, PB = 0.2, M = 6, PN = 400, prof = [], cum = [0], tot = 0, k, i;
+  for (k = 0; k <= PN; k++) {
+    var phi = k / PN * PI2, c = Math.cos(phi), s = Math.sin(phi);
+    prof.push([PA * sg(c) * Math.pow(Math.abs(c), 2 / M), PB * sg(s) * Math.pow(Math.abs(s), 2 / M)]);
+    if (k > 0) {
+      var dx = prof[k][0] - prof[k - 1][0], dz = prof[k][1] - prof[k - 1][1];
+      tot += Math.sqrt(dx * dx + dz * dz); cum.push(tot);
+    }
+  }
+  for (i = 0; i < 11000; i++) {
+    var r = rnd() * tot, lo = 0, hi = PN;
+    while (lo < hi) { var mid = (lo + hi) >> 1; if (cum[mid] < r) lo = mid + 1; else hi = mid; }
+    var px = prof[lo][0], pz = prof[lo][1];
+    var th = rnd() * PI2, ct = Math.cos(th), st = Math.sin(th), rr = R + px;
+    var nr = sg(px) * Math.pow(Math.abs(px / PA), M - 1) / PA;
+    var nz = sg(pz) * Math.pow(Math.abs(pz / PB), M - 1) / PB;
+    push(rr * ct, rr * st, pz, nr * ct, nr * st, nz, KB, 0);
+  }
+})();
+
+// head (frustum) + four prongs
+(function head() {
+  var i, y0 = 1.08, y1 = 1.3, r0 = 0.12, r1 = 0.18, h = y1 - y0, slope = (r0 - r1) / h;
+  for (i = 0; i < 700; i++) {
+    var t = rnd(), th = rnd() * PI2, r = r0 + (r1 - r0) * t, c = Math.cos(th), s = Math.sin(th);
+    push(r * c, y0 + h * t, r * s, c, slope, s, KP, 0);
+  }
+  for (var k = 0; k < 4; k++) {
+    var a = k * Math.PI / 2 + Math.PI / 4, ca = Math.cos(a), sa = Math.sin(a);
+    var B = [0.11 * ca, 1.1, 0.11 * sa], T = [0.275 * ca, 1.45, 0.275 * sa];
+    var d = [T[0] - B[0], T[1] - B[1], T[2] - B[2]], dl = Math.sqrt(d[0] * d[0] + d[1] * d[1] + d[2] * d[2]);
+    d = [d[0] / dl, d[1] / dl, d[2] / dl];
+    var e1 = [d[2], 0, -d[0]], el = Math.sqrt(e1[0] * e1[0] + e1[2] * e1[2]);
+    e1 = [e1[0] / el, 0, e1[2] / el];
+    var e2 = [d[1] * e1[2] - d[2] * e1[1], d[2] * e1[0] - d[0] * e1[2], d[0] * e1[1] - d[1] * e1[0]];
+    for (i = 0; i < 130; i++) {
+      var tt = rnd(), ph = rnd() * PI2, cp = Math.cos(ph), sp = Math.sin(ph), rr = 0.024;
+      var nx = cp * e1[0] + sp * e2[0], ny = cp * e1[1] + sp * e2[1], nz = cp * e1[2] + sp * e2[2];
+      push(B[0] + d[0] * dl * tt + rr * nx, B[1] + d[1] * dl * tt + rr * ny, B[2] + d[2] * dl * tt + rr * nz, nx, ny, nz, KP, 0);
+    }
+  }
+})();
+
+// faceted brilliant-cut diamond
+(function gem() {
+  var yg = 1.42, yt = yg + 0.12, yc = yg - 0.22, rg = 0.27, rt = 0.15, j;
+  var G = [], T = [], C = [0, yc, 0], Tc = [0, yt, 0], Cg = [0, yg - 0.04, 0];
+  for (j = 0; j < 16; j++) G.push([rg * Math.cos(j * Math.PI / 8), yg, rg * Math.sin(j * Math.PI / 8)]);
+  for (j = 0; j < 8; j++) T.push([rt * Math.cos(j * Math.PI / 4), yt, rt * Math.sin(j * Math.PI / 4)]);
+  function tri(A, B, Cc) {
+    var u = [B[0] - A[0], B[1] - A[1], B[2] - A[2]], v = [Cc[0] - A[0], Cc[1] - A[1], Cc[2] - A[2]];
+    var n = [u[1] * v[2] - u[2] * v[1], u[2] * v[0] - u[0] * v[2], u[0] * v[1] - u[1] * v[0]];
+    var nl = Math.sqrt(n[0] * n[0] + n[1] * n[1] + n[2] * n[2]), area = nl / 2;
+    n = [n[0] / nl, n[1] / nl, n[2] / nl];
+    var m = [(A[0] + B[0] + Cc[0]) / 3 - Cg[0], (A[1] + B[1] + Cc[1]) / 3 - Cg[1], (A[2] + B[2] + Cc[2]) / 3 - Cg[2]];
+    if (n[0] * m[0] + n[1] * m[1] + n[2] * m[2] < 0) n = [-n[0], -n[1], -n[2]];
+    var cnt = Math.max(3, Math.round(area * 7000)), ph = rnd() * PI2;
+    for (var i = 0; i < cnt; i++) {
+      var r1 = Math.sqrt(rnd()), r2 = rnd();
+      var a = 1 - r1, b = r1 * (1 - r2), c = r1 * r2;
+      push(a * A[0] + b * B[0] + c * Cc[0], a * A[1] + b * B[1] + c * Cc[1], a * A[2] + b * B[2] + c * Cc[2], n[0], n[1], n[2], KG, ph);
+    }
+  }
+  for (j = 0; j < 8; j++) {
+    var j1 = (j + 1) % 8;
+    tri(Tc, T[j], T[j1]);                                   // table
+    tri(T[j], T[j1], G[2 * j + 1]);                         // star
+    tri(T[j], G[2 * j], G[2 * j + 1]);                      // bezel
+    tri(T[j1], G[2 * j + 1], G[(2 * j + 2) % 16]);
+  }
+  for (j = 0; j < 16; j++) tri(G[j], G[(j + 1) % 16], C);  // pavilion
+})();
+
+var N = P.length / S;
+var D = new Float32Array(P); P = null;
+
+/* ---------- text atlas ---------- */
+var GROUPS = [".,'`", ":;-~", "+=*ico", "xzvnu", "aeSOA", "0&8$#", "%@MW"];
+var CHARS = GROUPS.join(""), GSTART = [], SH = 10, atlas, aw, ah;
+(function () { var s = 0; for (var i = 0; i < GROUPS.length; i++) { GSTART.push(s); s += GROUPS[i].length; } })();
+
+function buildAtlas() {
+  aw = Math.max(2, Math.ceil(cellW * DPR)); ah = Math.max(2, Math.ceil(cellH * DPR));
+  atlas = document.createElement("canvas");
+  atlas.width = aw * SH; atlas.height = ah * CHARS.length;
+  var g = atlas.getContext("2d");
+  g.font = Math.floor(ah * 0.82) + "px monospace";
+  g.textAlign = "center"; g.textBaseline = "middle";
+  for (var ci = 0; ci < CHARS.length; ci++) {
+    for (var s = 0; s < SH; s++) {
+      var l = Math.round(55 + 200 * s / (SH - 1));
+      g.fillStyle = "rgb(" + l + "," + l + "," + Math.min(255, Math.round(l * 1.04)) + ")";
+      g.fillText(CHARS[ci], (s + 0.5) * aw, (ci + 0.5) * ah + 1);
+    }
+  }
+}
+
+/* ---------- "I love you" text, built from the same glyphs ---------- */
+var TXT = "I love you", TXT_T = 6.2, TXT_D = 2.2;   // starts after the ring is complete
+var tcw, tch, TN = 0, TX, TY, TREV, TA, TCOL, TSD;
+
+function buildText() {
+  tcw = Math.max(2.4, cellW * 0.62); tch = tcw * 1.4;
+  var ratio = tcw / tch;
+  var cw = Math.floor(Math.min(W * 0.84, Rpx * 3.4) / tcw);
+  var cvs = document.createElement("canvas");
+  var m = cvs.getContext("2d");
+  m.font = "bold 100px sans-serif";
+  var mw = m.measureText(TXT).width || 500;
+  var fs = cw * 0.98 / mw * 100;
+  var chh = Math.ceil(fs * 1.2 * ratio);
+  cvs.width = cw; cvs.height = chh;
+  var g = cvs.getContext("2d");
+  g.setTransform(1, 0, 0, ratio, 0, 0);
+  g.font = "bold " + fs + "px sans-serif";
+  g.textAlign = "center"; g.textBaseline = "alphabetic"; g.fillStyle = "#fff";
+  g.fillText(TXT, cw / 2, fs * 0.9);
+  var data = g.getImageData(0, 0, cw, chh).data;
+  var x0 = cx - cw * tcw / 2, y0 = Math.min(cy + Rpx * 1.5, H - 60 - chh * tch);
+  var r = mulberry(99), n = 0, xx, yy;
+  for (var q = 3; q < data.length; q += 4) if (data[q] > 90) n++;
+  TX = new Float32Array(n); TY = new Float32Array(n); TREV = new Float32Array(n);
+  TA = new Float32Array(n); TCOL = new Float32Array(n); TSD = new Uint8Array(n);
+  var j = 0;
+  for (yy = 0; yy < chh; yy++) {
+    for (xx = 0; xx < cw; xx++) {
+      var a = data[(yy * cw + xx) * 4 + 3];
+      if (a <= 90) continue;
+      TX[j] = x0 + xx * tcw; TY[j] = y0 + yy * tch;
+      TCOL[j] = xx / cw; TA[j] = a / 255;
+      TREV[j] = TXT_T + TCOL[j] * TXT_D + r() * 0.25;   // written left to right
+      TSD[j] = (r() * 256) | 0;
+      j++;
+    }
+  }
+  TN = n;
+}
+
+/* ---------- screen / grid ---------- */
+var zb, chb, shb, dust = [];
+function resize() {
+  DPR = Math.min(window.devicePixelRatio || 1, 3);
+  W = window.innerWidth; H = window.innerHeight;
+  cv.width = Math.round(W * DPR); cv.height = Math.round(H * DPR);
+  Rpx = Math.min(W * 0.3, H * 0.2);
+  cx = W / 2; cy = H * 0.46;
+  cellW = Math.max(3, Rpx / 24); cellH = cellW * 1.55;
+  cols = Math.ceil(W / cellW) + 1; rows = Math.ceil(H / cellH) + 1;
+  zb = new Float32Array(cols * rows).fill(-1e9);
+  chb = new Uint8Array(cols * rows); shb = new Uint8Array(cols * rows);
+  buildAtlas();
+  buildText();
+  dust = [];
+  var r = mulberry(7);
+  for (var i = 0; i < 170; i++) dust.push([r() * W, r() * H, r() * PI2, 0.4 + r() * 1.6, r() < 0.15 ? 2 : 1]);
+}
+window.addEventListener("resize", resize);
+
+/* ---------- lights ---------- */
+function nrm(a) { var l = Math.sqrt(a[0] * a[0] + a[1] * a[1] + a[2] * a[2]); return [a[0] / l, a[1] / l, a[2] / l]; }
+var L1 = nrm([-0.5, 0.7, 0.6]);
+var H1 = nrm([L1[0], L1[1], L1[2] + 1]);
+
+/* ---------- orbits ---------- */
+var ORB = [{ rz: 0.62, ra: 1.55, rb: 0.8, sp: 0.5, ph: 0 }, { rz: -0.62, ra: 1.55, rb: 0.8, sp: -0.4, ph: 2 }];
+function orbitPt(o, a, psi, out) {
+  var x = o.ra * Math.cos(a), y = 0, z = o.rb * Math.sin(a);
+  var cz = Math.cos(o.rz), sz = Math.sin(o.rz);
+  var x1 = x * cz - y * sz, y1 = x * sz + y * cz, z1 = z;
+  var pp = psi * 0.5, cp = Math.cos(pp), sp = Math.sin(pp);
+  var x2 = x1 * cp + z1 * sp, z2 = -x1 * sp + z1 * cp, y2 = y1;
+  var cT = Math.cos(TILT + 0.15), sT = Math.sin(TILT + 0.15);
+  var y3 = y2 * cT - z2 * sT, z3 = y2 * sT + z2 * cT;
+  var sc = F / (F - z3);
+  out[0] = cx + x2 * sc * Rpx; out[1] = cy - y3 * sc * Rpx; out[2] = z3;
+}
+
+/* ---------- main loop ---------- */
+var t0 = 0, last = 0, fps = 30, gl = [], tmp = [0, 0, 0];
+
+function frame(ts) {
+  requestAnimationFrame(frame);
+  if (!t0) t0 = ts;
+  var el = ts - last;
+  if (el < 30) return;
+  fps = fps * 0.9 + (1000 / el) * 0.1; last = ts;
+  var t = ((ts - t0) / 1000) % LOOP;
+  var gfade = t > LOOP - 1 ? Math.max(0, LOOP - t) : 1;
+  var psi = 0.19 * t;
+  var cp = Math.cos(psi), sp = Math.sin(psi), cT = Math.cos(TILT), sT = Math.sin(TILT);
+  var w2 = t * 1.1, L2 = nrm([Math.cos(w2), 0.4, Math.sin(w2) * 0.8 + 0.1]);
+  var H2 = nrm([L2[0], L2[1], L2[2] + 1]);
+  var i, o, idx;
+
+  ctx.setTransform(DPR, 0, 0, DPR, 0, 0);
+  ctx.globalCompositeOperation = "source-over";
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "#000"; ctx.fillRect(0, 0, W, H);
+
+  /* dust */
+  for (i = 0; i < dust.length; i++) {
+    var d = dust[i], a = (0.15 + 0.35 * (0.5 + 0.5 * Math.sin(t * d[3] + d[2]))) * gfade;
+    ctx.fillStyle = "rgba(200,205,220," + a.toFixed(3) + ")";
+    ctx.fillRect(d[0], d[1], d[4], d[4]);
+  }
+
+  /* orbits (dotted, faint) + comets */
+  for (var k = 0; k < ORB.length; k++) {
+    var ob = ORB[k];
+    for (i = 0; i < 90; i++) {
+      orbitPt(ob, i / 90 * PI2, psi, tmp);
+      ctx.fillStyle = "rgba(170,175,190," + ((tmp[2] < 0 ? 0.1 : 0.2) * gfade).toFixed(3) + ")";
+      ctx.fillRect(tmp[0], tmp[1], 1.6, 1.6);
+    }
+    for (var c = 0; c < 2; c++) {
+      var base = t * ob.sp * 2 + ob.ph + c * Math.PI;
+      for (var q = 0; q < 12; q++) {
+        orbitPt(ob, base - q * 0.045 * sg(ob.sp), psi, tmp);
+        ctx.fillStyle = "rgba(230,235,250," + (((1 - q / 12) * 0.7) * gfade).toFixed(3) + ")";
+        var sz = q === 0 ? 2.6 : 1.8; ctx.fillRect(tmp[0] - sz / 2, tmp[1] - sz / 2, sz, sz);
+      }
+    }
+  }
+
+  /* ring point cloud -> grid */
+  gl.length = 0;
+  for (i = 0; i < N; i++) {
+    o = i * S;
+    var age = t - D[o + 6];
+    if (age < 0) continue;
+    var x0 = D[o], y0 = D[o + 1], z0 = D[o + 2], nx0 = D[o + 3], ny0 = D[o + 4], nz0 = D[o + 5];
+    var nx1 = nx0 * cp + nz0 * sp, nz1 = -nx0 * sp + nz0 * cp;
+    var nz2 = ny0 * sT + nz1 * cT;
+    if (nz2 < -0.08) continue;
+    var x1 = x0 * cp + z0 * sp, z1 = -x0 * sp + z0 * cp;
+    var y2 = y0 * cT - z1 * sT, z2 = y0 * sT + z1 * cT;
+    var sc = F / (F - z2);
+    var sx = cx + x1 * sc * Rpx, sy = cy - y2 * sc * Rpx;
+    var ci = (sx / cellW) | 0, ri = (sy / cellH) | 0;
+    if (ci < 0 || ci >= cols || ri < 0 || ri >= rows) continue;
+    idx = ri * cols + ci;
+    if (z2 <= zb[idx]) continue;
+
+    var ny2 = ny0 * cT - nz1 * sT;
+    var kind = D[o + 7], b, spec = 0;
+    var d1 = nx1 * L1[0] + ny2 * L1[1] + nz2 * L1[2];
+    var d2 = nx1 * L2[0] + ny2 * L2[1] + nz2 * L2[2];
+    var h1 = nx1 * H1[0] + ny2 * H1[1] + nz2 * H1[2];
+    var h2 = nx1 * H2[0] + ny2 * H2[1] + nz2 * H2[2];
+    if (kind === KG) {
+      var f1 = h1 > 0 ? Math.pow(h1, 14) : 0, f2 = h2 > 0 ? Math.pow(h2, 14) : 0;
+      spec = f1 + f2;
+      b = 0.2 + 0.18 * (0.5 + 0.5 * Math.sin(t * 3 + D[o + 9])) + 0.3 * Math.max(0, d1) + 0.35 * Math.max(0, d2) + 0.9 * spec;
+    } else {
+      var s1 = h1 > 0 ? Math.pow(h1, 26) : 0, s2 = h2 > 0 ? Math.pow(h2, 26) : 0;
+      spec = s1 + s2;
+      var fr = Math.pow(1 - Math.max(0, nz2), 2);
+      b = 0.1 + 0.5 * Math.max(0, d1) + 0.55 * Math.max(0, d2) + 0.9 * spec + 0.28 * fr;
+    }
+    b *= Math.min(1, age / 0.3);
+    b += 0.8 * Math.exp(-age * 5);
+    b *= gfade;
+    if (b > 1) b = 1;
+    if (b < 0.04) continue;
+
+    zb[idx] = z2;
+    var gi = Math.min(6, (b * 7) | 0), len = GROUPS[gi].length;
+    var seed = D[o + 8];
+    chb[idx] = GSTART[gi] + ((seed * 13 + ((t * 2.5 + seed) | 0)) % len);
+    shb[idx] = Math.min(SH - 1, (b * SH) | 0);
+
+    if (spec > 0.8 && kind !== KP && gl.length < 80 && (kind === KG || (seed & 3) === 0)) {
+      gl.push(sx, sy, Math.min(1, spec * 0.7), D[o + 9] + seed);
+    }
+  }
+
+  /* draw glyphs */
+  var letters = 0, total = cols * rows, r, c2;
+  for (idx = 0; idx < total; idx++) {
+    if (zb[idx] < -1e8) continue;
+    r = (idx / cols) | 0; c2 = idx - r * cols;
+    ctx.drawImage(atlas, shb[idx] * aw, chb[idx] * ah, aw, ah, c2 * cellW, r * cellH, cellW, cellH);
+    zb[idx] = -1e9; letters++;
+  }
+
+  /* "I love you": same glyphs, same reveal (glow at the writing edge), moving highlight */
+  if (t > TXT_T) {
+    var sweep = ((t * 0.28) % 1.5) - 0.25;
+    for (var tj = 0; tj < TN; tj++) {
+      var tage = t - TREV[tj];
+      if (tage < 0) continue;
+      var dc = TCOL[tj] - sweep, hl = Math.exp(-dc * dc / 0.006) * 0.65;
+      var tb = TA[tj] * (0.55 + 0.2 * Math.sin(t * 2 + TSD[tj] * 0.05 + TCOL[tj] * 8)) + hl;
+      tb *= Math.min(1, tage / 0.3);
+      tb += 0.8 * Math.exp(-tage * 5);
+      tb *= gfade;
+      if (tb > 1) tb = 1;
+      if (tb < 0.04) continue;
+      var tg = Math.min(6, (tb * 7) | 0), tsd = TSD[tj];
+      var tchr = GSTART[tg] + ((tsd * 13 + ((t * 2.5 + tsd) | 0)) % GROUPS[tg].length);
+      ctx.drawImage(atlas, Math.min(SH - 1, (tb * SH) | 0) * aw, tchr * ah, aw, ah, TX[tj], TY[tj], tcw + 0.3, tch + 0.3);
+      letters++;
+      if (hl > 0.45 && (tsd & 15) === 0 && gl.length < 120) gl.push(TX[tj] + tcw / 2, TY[tj] + tch / 2, Math.min(1, hl) * 0.6, tsd);
+    }
+  }
+
+  /* glints (star flares) */
+  ctx.globalCompositeOperation = "lighter";
+  ctx.lineWidth = 1;
+  for (i = 0; i < gl.length; i += 4) {
+    var gx = gl[i], gy = gl[i + 1], gin = gl[i + 2];
+    var fl = 0.65 + 0.35 * Math.sin(t * 9 + gl[i + 3] * 7);
+    var Ln = (6 + 36 * gin) * fl, al = Math.min(1, 0.25 + gin * 0.7) * gfade;
+    ctx.strokeStyle = "rgba(255,250,235," + al.toFixed(3) + ")";
+    ctx.beginPath();
+    ctx.moveTo(gx, gy - Ln); ctx.lineTo(gx, gy + Ln * 0.7);
+    ctx.moveTo(gx - Ln * 0.55, gy); ctx.lineTo(gx + Ln * 0.55, gy);
+    ctx.stroke();
+    ctx.strokeStyle = "rgba(255,250,235," + (al * 0.5).toFixed(3) + ")";
+    ctx.beginPath();
+    ctx.moveTo(gx - Ln * 0.3, gy - Ln * 0.3); ctx.lineTo(gx + Ln * 0.3, gy + Ln * 0.3);
+    ctx.moveTo(gx - Ln * 0.3, gy + Ln * 0.3); ctx.lineTo(gx + Ln * 0.3, gy - Ln * 0.3);
+    ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255," + al.toFixed(3) + ")";
+    ctx.fillRect(gx - 1, gy - 1, 2, 2);
+  }
+  ctx.globalCompositeOperation = "source-over";
+
+  /* HUD */
+  var rot = ((psi * 180 / Math.PI) % 360).toFixed(2);
+  while (rot.length < 6) rot = "0" + rot;
+  ctx.font = "10px monospace"; ctx.textBaseline = "alphabetic";
+  ctx.textAlign = "right";
+  ctx.fillStyle = "#e8708a";
+  ctx.fillText("\u25CF t " + (t < 10 ? "0" : "") + t.toFixed(2) + "s", W - 16, Math.max(30, H * 0.07));
+  ctx.textAlign = "left"; ctx.fillStyle = "#6f7480";
+  var by = H - 18;
+  ctx.fillText("running \u00B7 " + Math.round(fps) + " fps", 16, by);
+  ctx.fillText("letters " + letters.toLocaleString("en-US"), 16, by - 14);
+  ctx.fillText("glints " + (gl.length / 4), 16, by - 28);
+  ctx.fillText("rotation " + rot + "\u00B0", 16, by - 42);
+}
+
+window.addEventListener("pointerdown", function () { t0 = last; });
+resize();
+requestAnimationFrame(frame);
+})();
+</script>
+</body>
+</html>
